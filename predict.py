@@ -6,6 +6,7 @@ from PIL import Image
 import os
 import argparse
 import sys
+import time
 
 from models import *
 
@@ -75,14 +76,18 @@ def main():
             
         inputs = transform_test(image).unsqueeze(0).to(device)
         
-        # 추론 수행
+        # 추론 및 시간 측정 수행
+        start_time = time.perf_counter()
         with torch.no_grad():
             outputs = net(inputs)
             probabilities = torch.softmax(outputs, dim=1)
             confidence, predicted = probabilities.max(1)
-            
+        end_time = time.perf_counter()
+        inference_time = (end_time - start_time) * 1000 # ms
+        
         print(f"\n[Inference Result for User Image: '{args.image}']")
         print(f"Predicted class: {classes[predicted.item()]} (Confidence: {confidence.item()*100:.2f}%)")
+        print(f"Inference Time : {inference_time:.2f} ms")
         print("\nAll class probabilities:")
         for i, prob in enumerate(probabilities[0]):
             print(f"  {classes[i]:<10}: {prob.item()*100:.2f}%")
@@ -115,6 +120,8 @@ def main():
         
         print(f"Starting inference on {len(testset)} images (Batch Size: {args.batch_size})..")
         
+        # 전체 dataset 평가 시간 측정 시작
+        start_time = time.perf_counter()
         with torch.no_grad():
             for batch_idx, (inputs, targets) in enumerate(testloader):
                 inputs, targets = inputs.to(device), targets.to(device)
@@ -136,10 +143,18 @@ def main():
                     progress = (batch_idx + 1) / len(testloader) * 100
                     print(f"Progress: {progress:>6.2f}% | Batch [{batch_idx+1}/{len(testloader)}] | Current Accum. Acc: {100.*correct/total:.2f}%")
         
+        # 전체 dataset 평가 시간 측정 종료
+        end_time = time.perf_counter()
+        total_time = end_time - start_time
+        avg_time = (total_time / total) * 1000 if total > 0 else 0 # ms per image
+        
         # 5. 최종 결과 리포트 출력
         total_acc = 100. * correct / total
         print("\n" + "="*55)
         print(f"🏆 [Evaluation Result] Total Test Accuracy: {total_acc:.2f}% ({correct}/{total})")
+        print(f"⏱️  [Runtime Statistics]")
+        print(f"  - Total Elapsed Time : {total_time:.2f} seconds")
+        print(f"  - Avg Time per Image : {avg_time:.2f} ms")
         print("="*55)
         print(f" {'Class':<12} | {'Accuracy':<10} | {'Correct/Total':<15}")
         print("-"*55)
