@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torchvision
 import torchvision.transforms as transforms
 from PIL import Image
 import os
@@ -12,6 +13,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Prediction')
     parser.add_argument('--image', default='', type=str, help='path to input image')
     parser.add_argument('--checkpoint', default='./checkpoint/ckpt.pth', type=str, help='path to checkpoint')
+    parser.add_argument('--batch-size', default=100, type=int, help='batch size for evaluation')
     return parser.parse_args()
 
 def main():
@@ -52,38 +54,8 @@ def main():
     classes = ('plane', 'car', 'bird', 'cat', 'deer',
                'dog', 'frog', 'horse', 'ship', 'truck')
                
-    # 3. 입력 이미지 전처리 및 추론
-    if args.image == '':
-        print("No image file specified via --image. Attempting to load a sample from CIFAR-10 test set..")
-        try:
-            import torchvision
-            # CIFAR-10 테스트셋 로드 (학습시 이미 다운로드 받았을 것으로 가정, 없을 시 다운로드)
-            testset = torchvision.datasets.CIFAR10(
-                root='./data', train=False, download=True)
-            
-            # 첫 번째 샘플 가져오기 (0번째)
-            sample_img, sample_label = testset[0]
-            print(f"Successfully loaded a sample from CIFAR-10 test set (Ground Truth: {classes[sample_label]})")
-            
-            # 임시 파일로 저장하여 사용자가 확인할 수 있도록 함
-            sample_img_path = './demo_sample.png'
-            sample_img.save(sample_img_path)
-            print(f"Saved the sample image to '{sample_img_path}' for reference.")
-            
-            # CIFAR-10용 Normalize 변환 적용 (32x32 크기이므로 resize 불필요)
-            transform_test = transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-            ])
-            inputs = transform_test(sample_img).unsqueeze(0).to(device)
-            target_name = f"CIFAR-10 Test Sample 0 (Ground Truth: {classes[sample_label]})"
-            
-        except Exception as e:
-            print(f"Failed to load CIFAR-10 test sample: {e}")
-            print("Falling back to random dummy input (3, 32, 32).")
-            inputs = torch.randn(1, 3, 32, 32).to(device)
-            target_name = "Random Dummy Tensor"
-    else:
+    # 3. 단일 이미지 추론 모드
+    if args.image != '':
         if not os.path.exists(args.image):
             print(f"Error: image file not found at '{args.image}'")
             sys.exit(1)
@@ -102,19 +74,80 @@ def main():
             sys.exit(1)
             
         inputs = transform_test(image).unsqueeze(0).to(device)
-        target_name = f"User Image: {args.image}"
         
-    # 4. 추론 수행
-    with torch.no_grad():
-        outputs = net(inputs)
-        probabilities = torch.softmax(outputs, dim=1)
-        confidence, predicted = probabilities.max(1)
+        # 추론 수행
+        with torch.no_grad():
+            outputs = net(inputs)
+            probabilities = torch.softmax(outputs, dim=1)
+            confidence, predicted = probabilities.max(1)
+            
+        print(f"\n[Inference Result for User Image: '{args.image}']")
+        print(f"Predicted class: {classes[predicted.item()]} (Confidence: {confidence.item()*100:.2f}%)")
+        print("\nAll class probabilities:")
+        for i, prob in enumerate(probabilities[0]):
+            print(f"  {classes[i]:<10}: {prob.item()*100:.2f}%")
+            
+    # 4. 전체 CIFAR-10 테스트 데이터셋 일괄 추론 및 평가 모드
+    else:
+        print("No image file specified. Evaluating the model on the ENTIRE CIFAR-10 test dataset..")
         
-    print(f"\n[Inference Result for {target_name}]")
-    print(f"Predicted class: {classes[predicted.item()]} (Confidence: {confidence.item()*100:.2f}%)")
-    print("\nAll class probabilities:")
-    for i, prob in enumerate(probabilities[0]):
-        print(f"  {classes[i]:<10}: {prob.item()*100:.2f}%")
+        # CIFAR-10 테스트 데이터셋 정규화 트랜스폼
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        ])
+        
+        try:
+            testset = torchvision.datasets.CIFAR10(
+                root='./data', train=False, download=True, transform=transform_test)
+            testloader = torch.utils.data.DataLoader(
+                testset, batch_size=args.batch_size, shuffle=False, num_workers=0)
+        except Exception as e:
+            print(f"Error loading CIFAR-10 dataset: {e}")
+            sys.exit(1)
+            
+        correct = 0
+        total = 0
+        
+        # 클래스별 통계 데이터 구조 초기화
+        class_correct = [0] * 10
+        class_total = [0] * 10
+        
+        print(f"Starting inference on {len(testset)} images (Batch Size: {args.batch_size})..")
+        
+        with torch.no_grad():
+            for batch_idx, (inputs, targets) in enumerate(testloader):
+                inputs, targets = inputs.to(device), targets.to(device)
+                outputs = net(inputs)
+                
+                _, predicted = outputs.max(1)
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
+                
+                # 클래스별 개별 정확도 기록을 위한 안전한 매칭 카운팅
+                c = (predicted == targets)
+                for i in range(len(targets)):
+                    label = targets[i].item()
+                    class_correct[label] += int(c[i].item())
+                    class_total[label] += 1
+                
+                # 5개 배치 단위 또는 마지막 배치 도달 시 가벼운 진행 상황 로그 출력
+                if (batch_idx + 1) % 5 == 0 or (batch_idx + 1) == len(testloader):
+                    progress = (batch_idx + 1) / len(testloader) * 100
+                    print(f"Progress: {progress:>6.2f}% | Batch [{batch_idx+1}/{len(testloader)}] | Current Accum. Acc: {100.*correct/total:.2f}%")
+        
+        # 5. 최종 결과 리포트 출력
+        total_acc = 100. * correct / total
+        print("\n" + "="*55)
+        print(f"🏆 [Evaluation Result] Total Test Accuracy: {total_acc:.2f}% ({correct}/{total})")
+        print("="*55)
+        print(f" {'Class':<12} | {'Accuracy':<10} | {'Correct/Total':<15}")
+        print("-"*55)
+        for i in range(10):
+            acc = 100. * class_correct[i] / class_total[i] if class_total[i] > 0 else 0
+            correct_str = f"{class_correct[i]}/{class_total[i]}"
+            print(f"  {classes[i]:<10} | {acc:>8.2f}% | {correct_str:<15}")
+        print("="*55)
 
 if __name__ == '__main__':
     main()
